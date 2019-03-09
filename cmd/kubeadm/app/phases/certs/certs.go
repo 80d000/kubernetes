@@ -57,7 +57,7 @@ func CreatePKIAssets(cfg *kubeadmapi.InitConfiguration) error {
 		return errors.Wrap(err, "error creating PKI assets")
 	}
 
-	fmt.Printf("[certs] valid certificates and keys now exist in %q\n", cfg.CertificatesDir)
+	fmt.Printf("[certs] Valid certificates and keys now exist in %q\n", cfg.CertificatesDir)
 
 	// Service accounts are not x509 certs, so handled separately
 	return CreateServiceAccountKeyAndPublicKeyFiles(cfg.CertificatesDir)
@@ -328,7 +328,7 @@ type certKeyLocation struct {
 }
 
 // SharedCertificateExists verifies if the shared certificates - the certificates that must be
-// equal across masters: ca.key, ca.crt, sa.key, sa.pub + etcd/ca.key, etcd/ca.crt if local/stacked etcd
+// equal across control-plane nodes: ca.key, ca.crt, sa.key, sa.pub + etcd/ca.key, etcd/ca.crt if local/stacked etcd
 func SharedCertificateExists(cfg *kubeadmapi.ClusterConfiguration) (bool, error) {
 
 	if err := validateCACertAndKey(certKeyLocation{cfg.CertificatesDir, kubeadmconstants.CACertAndKeyBaseName, "", "CA"}); err != nil {

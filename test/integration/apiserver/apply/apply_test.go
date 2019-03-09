@@ -61,32 +61,63 @@ func TestApplyAlsoCreates(t *testing.T) {
 	_, client, closeFn := setup(t)
 	defer closeFn()
 
-	_, err := client.CoreV1().RESTClient().Patch(types.ApplyPatchType).
-		Namespace("default").
-		Resource("pods").
-		Name("test-pod").
-		Body([]byte(`{
-			"apiVersion": "v1",
-			"kind": "Pod",
-			"metadata": {
-				"name": "test-pod"
-			},
-			"spec": {
-				"containers": [{
-					"name":  "test-container",
-					"image": "test-image"
-				}]
-			}
-		}`)).
-		Do().
-		Get()
-	if err != nil {
-		t.Fatalf("Failed to create object using Apply patch: %v", err)
+	testCases := []struct {
+		resource string
+		name     string
+		body     string
+	}{
+		{
+			resource: "pods",
+			name:     "test-pod",
+			body: `{
+				"apiVersion": "v1",
+				"kind": "Pod",
+				"metadata": {
+					"name": "test-pod"
+				},
+				"spec": {
+					"containers": [{
+						"name":  "test-container",
+						"image": "test-image"
+					}]
+				}
+			}`,
+		}, {
+			resource: "services",
+			name:     "test-svc",
+			body: `{
+				"apiVersion": "v1",
+				"kind": "Service",
+				"metadata": {
+					"name": "test-svc"
+				},
+				"spec": {
+					"ports": [{
+						"port": 8080,
+						"protocol": "UDP"
+					}]
+				}
+			}`,
+		},
 	}
 
-	_, err = client.CoreV1().RESTClient().Get().Namespace("default").Resource("pods").Name("test-pod").Do().Get()
-	if err != nil {
-		t.Fatalf("Failed to retrieve object: %v", err)
+	for _, tc := range testCases {
+		_, err := client.CoreV1().RESTClient().Patch(types.ApplyPatchType).
+			Namespace("default").
+			Resource(tc.resource).
+			Name(tc.name).
+			Param("fieldManager", "apply_test").
+			Body([]byte(tc.body)).
+			Do().
+			Get()
+		if err != nil {
+			t.Fatalf("Failed to create object using Apply patch: %v", err)
+		}
+
+		_, err = client.CoreV1().RESTClient().Get().Namespace("default").Resource(tc.resource).Name(tc.name).Do().Get()
+		if err != nil {
+			t.Fatalf("Failed to retrieve object: %v", err)
+		}
 	}
 }
 
@@ -102,6 +133,7 @@ func TestCreateOnApplyFailsWithUID(t *testing.T) {
 		Namespace("default").
 		Resource("pods").
 		Name("test-pod-uid").
+		Param("fieldManager", "apply_test").
 		Body([]byte(`{
 			"apiVersion": "v1",
 			"kind": "Pod",
@@ -164,6 +196,7 @@ func TestApplyUpdateApplyConflictForced(t *testing.T) {
 		Namespace("default").
 		Resource("deployments").
 		Name("deployment").
+		Param("fieldManager", "apply_test").
 		Body(obj).Do().Get()
 	if err != nil {
 		t.Fatalf("Failed to create object using Apply patch: %v", err)
@@ -184,6 +217,7 @@ func TestApplyUpdateApplyConflictForced(t *testing.T) {
 		Namespace("default").
 		Resource("deployments").
 		Name("deployment").
+		Param("fieldManager", "apply_test").
 		Body([]byte(obj)).Do().Get()
 	if err == nil {
 		t.Fatalf("Expecting to get conflicts when applying object")
@@ -202,6 +236,7 @@ func TestApplyUpdateApplyConflictForced(t *testing.T) {
 		Resource("deployments").
 		Name("deployment").
 		Param("force", "true").
+		Param("fieldManager", "apply_test").
 		Body([]byte(obj)).Do().Get()
 	if err != nil {
 		t.Fatalf("Failed to apply object with force: %v", err)
@@ -219,11 +254,16 @@ func TestApplyManagedFields(t *testing.T) {
 		Namespace("default").
 		Resource("configmaps").
 		Name("test-cm").
+		Param("fieldManager", "apply_test").
 		Body([]byte(`{
 			"apiVersion": "v1",
 			"kind": "ConfigMap",
 			"metadata": {
-				"name": "test-cm"
+				"name": "test-cm",
+				"namespace": "default",
+				"labels": {
+					"test-label": "test"
+				}
 			},
 			"data": {
 				"key": "value"
@@ -239,6 +279,7 @@ func TestApplyManagedFields(t *testing.T) {
 		Namespace("default").
 		Resource("configmaps").
 		Name("test-cm").
+		Param("fieldManager", "updater").
 		Body([]byte(`{"data":{"key": "new value"}}`)).Do().Get()
 	if err != nil {
 		t.Fatalf("Failed to patch object: %v", err)
@@ -267,21 +308,24 @@ func TestApplyManagedFields(t *testing.T) {
 			"uid": "` + string(accessor.GetUID()) + `",
 			"resourceVersion": "` + accessor.GetResourceVersion() + `",
 			"creationTimestamp": "` + accessor.GetCreationTimestamp().UTC().Format(time.RFC3339) + `",
+			"labels": {
+				"test-label": "test"
+			},
 			"managedFields": [
 				{
-					"manager": "apply",
+					"manager": "apply_test",
 					"operation": "Apply",
 					"apiVersion": "v1",
 					"fields": {
-						"f:apiVersion": {},
-						"f:kind": {},
 						"f:metadata": {
-							"f:name": {}
+							"f:labels": {
+								"f:test-label": {}
+							}
 						}
 					}
 				},
 				{
-					"manager": "` + accessor.GetManagedFields()[1].Manager + `",
+					"manager": "updater",
 					"operation": "Update",
 					"apiVersion": "v1",
 					"time": "` + accessor.GetManagedFields()[1].Time.UTC().Format(time.RFC3339) + `",
@@ -300,5 +344,97 @@ func TestApplyManagedFields(t *testing.T) {
 
 	if string(expected) != string(actual) {
 		t.Fatalf("Expected:\n%v\nGot:\n%v", string(expected), string(actual))
+	}
+}
+
+// TestApplyRemovesEmptyManagedFields there are no empty managers in managedFields
+func TestApplyRemovesEmptyManagedFields(t *testing.T) {
+	defer utilfeaturetesting.SetFeatureGateDuringTest(t, utilfeature.DefaultFeatureGate, genericfeatures.ServerSideApply, true)()
+
+	_, client, closeFn := setup(t)
+	defer closeFn()
+
+	obj := []byte(`{
+		"apiVersion": "v1",
+		"kind": "ConfigMap",
+		"metadata": {
+			"name": "test-cm",
+			"namespace": "default"
+		}
+	}`)
+
+	_, err := client.CoreV1().RESTClient().Patch(types.ApplyPatchType).
+		Namespace("default").
+		Resource("configmaps").
+		Name("test-cm").
+		Param("fieldManager", "apply_test").
+		Body(obj).
+		Do().
+		Get()
+	if err != nil {
+		t.Fatalf("Failed to create object using Apply patch: %v", err)
+	}
+
+	_, err = client.CoreV1().RESTClient().Patch(types.ApplyPatchType).
+		Namespace("default").
+		Resource("configmaps").
+		Name("test-cm").
+		Param("fieldManager", "apply_test").
+		Body(obj).Do().Get()
+	if err != nil {
+		t.Fatalf("Failed to patch object: %v", err)
+	}
+
+	object, err := client.CoreV1().RESTClient().Get().Namespace("default").Resource("configmaps").Name("test-cm").Do().Get()
+	if err != nil {
+		t.Fatalf("Failed to retrieve object: %v", err)
+	}
+
+	accessor, err := meta.Accessor(object)
+	if err != nil {
+		t.Fatalf("Failed to get meta accessor: %v", err)
+	}
+
+	if managed := accessor.GetManagedFields(); managed != nil {
+		t.Fatalf("Object contains unexpected managedFields: %v", managed)
+	}
+}
+
+func TestApplyRequiresFieldManager(t *testing.T) {
+	defer utilfeaturetesting.SetFeatureGateDuringTest(t, utilfeature.DefaultFeatureGate, genericfeatures.ServerSideApply, true)()
+
+	_, client, closeFn := setup(t)
+	defer closeFn()
+
+	obj := []byte(`{
+		"apiVersion": "v1",
+		"kind": "ConfigMap",
+		"metadata": {
+			"name": "test-cm",
+			"namespace": "default"
+		}
+	}`)
+
+	_, err := client.CoreV1().RESTClient().Patch(types.ApplyPatchType).
+		Namespace("default").
+		Resource("configmaps").
+		Name("test-cm").
+		Body(obj).
+		Do().
+		Get()
+	if err == nil {
+		t.Fatalf("Apply should fail to create without fieldManager")
+	}
+
+	_, err = client.CoreV1().RESTClient().Patch(types.ApplyPatchType).
+		Namespace("default").
+		Resource("configmaps").
+		Name("test-cm").
+		Param("fieldManager", "apply_test").
+		Body(obj).
+		Do().
+		Get()
+	if err != nil {
+		t.Fatalf("Apply failed to create with fieldManager: %v", err)
 	}
 }
